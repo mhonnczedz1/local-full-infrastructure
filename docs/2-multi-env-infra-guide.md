@@ -1371,7 +1371,7 @@ It lives **outside** `kubernetes/` on purpose. Every path under there is either 
 #     - build: 26W38B3
 #       service: service-1
 #       reason: OOMs at real queue depth after ~6h
-#       denied_by: mhonn
+#       denied_by: your-github-handle
 denied: []
 ```
 

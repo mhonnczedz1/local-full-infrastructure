@@ -1208,6 +1208,9 @@ If you ever swap pip for `uv`, note that `UV_INDEX_URL` and `UV_DEFAULT_INDEX` m
 **Goal:** A venv pointed at public PyPI, with dev dependencies installed and importable.
 
 **Why:** The `pip.conf` step is the one that matters and the one easiest to skip. If this venv resolves against that internal mirror, a pinned version that exists only there will install cleanly on your Mac and then fail in CI, which is a slow and confusing way to discover the problem. Note there is no `[project]` table in `pyproject.toml` on purpose: these services ship as container images, not as Python packages.
+
+```bash
+cd $PLATFORM_HOME/lfi-service-2-app
 mkdir -p src tests
 touch src/__init__.py tests/__init__.py
 ```
