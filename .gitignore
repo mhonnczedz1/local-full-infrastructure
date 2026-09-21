@@ -1,0 +1,77 @@
+# -----------------------------------------------------------------------------
+# The three nested repositories.
+#
+# This workspace holds three Git repositories and is itself a fourth. Without
+# these rules Git sees the nested repos and offers to add them as broken
+# submodule-like entries whose contents it will not track. They are public and
+# manage themselves; see the README for links.
+#
+# This block is the one prescribed by docs/1-local-full-infra-guide.md, in
+# "A note on nesting Git repos".
+# -----------------------------------------------------------------------------
+lfi-service-1-app/
+lfi-service-2-app/
+lfi-infrastructure-gitops/
+
+# -----------------------------------------------------------------------------
+# Local-only working material. Build-process artifacts and tool state, not
+# follower-facing content.
+# -----------------------------------------------------------------------------
+.superpowers/
+.tmp/
+.playwright-mcp/
+.claude/
+diagrams/
+tmp.txt
+
+# -----------------------------------------------------------------------------
+# Secrets. Nothing here should ever exist at the workspace root, but the rules
+# are cheap and the failure mode is permanent.
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# -----------------------------------------------------------------------------
+# OS and editor noise.
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# -----------------------------------------------------------------------------
+# Working notes from agent sessions. These have contained work email addresses,
+# internal hostnames, and credential assessments. They must never be published.
+# -----------------------------------------------------------------------------
+HANDOFF-*.md
+
+# -----------------------------------------------------------------------------
+# docs/ is an allowlist, not a blocklist.
+#
+# Agent sessions write planning documents into docs/, and at least one of those
+# has contained internal hostnames and personal addresses. A blocklist would
+# need updating every time a new one lands, and forgetting once is permanent.
+# So: ignore everything in docs/, then name the files that are meant to ship.
+#
+# Adding a genuine new doc means adding a matching negation here. That is the
+# intended friction.
+# -----------------------------------------------------------------------------
+docs/*
+!docs/1-local-full-infra-guide.md
+!docs/2-multi-env-infra-guide.md
+!docs/resource_check.md
+!docs/resource_check.sh
+
+# Same reasoning for the trackers at the root.
+tracker_*.md
+!tracker_1_local_infra.md
+!tracker_2_multi_env.md
