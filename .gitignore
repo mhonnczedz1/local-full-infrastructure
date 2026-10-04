@@ -75,3 +75,5 @@ docs/*
 tracker_*.md
 !tracker_1_local_infra.md
 !tracker_2_multi_env.md
+!docs/3-eks-counterpart-guide.md
+!tracker_3_eks.md

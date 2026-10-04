@@ -55,7 +55,7 @@ The parent guide's shift was push to pull. This guide's shift is smaller and eas
                 |
         +-------+-------+
         |               |
-   overlays/dev/   overlays/prod/       two sets of differences
+   overlays/local/dev/  overlays/local/prod/   two sets of differences
         |               |
    platform-dev    platform-prod        two namespaces
         |               |
@@ -109,6 +109,7 @@ If you find yourself wanting to rebuild something during a promotion, something 
 | 11 | Node memory | **Optional honest per-node caps** | Both k3d nodes currently report the full VM memory while sharing one VM, so the scheduler believes it has double what exists. |
 | 12 | Image tag scheme | **Weekly build ordinals, `26W38B1`, plus a SHA tag on the same image** | A 40-character SHA is unreadable in a release PR and impossible to say out loud. The second tag and the OCI labels keep the commit recoverable, which is the property the SHA was there for. |
 | 13 | Vetoing a bad build | **A deny list in the GitOps repo** | Green CI is not the same as "works". A veto needs an author, a timestamp, a diff, and a revert like every other decision here. |
+| 14 | Cluster as a path segment | **`overlays/local/` and `argocd/apps-local/`** | The cluster is the first dimension, the environment the second. Each cluster's root Application watches only its own `argocd/apps-<cluster>` directory, so a second cluster (see the EKS guide) deploys only its own apps. |
 
 ### Note on decision 1
 
@@ -157,10 +158,10 @@ Worth reading before you start, because the amount of *unchanged* material is th
 | Workload kind | `Deployment` | `Rollout` |
 | Namespace | one, `platform` | two, `platform-dev` and `platform-prod` |
 | ArgoCD child apps | 3 | 6 |
-| Root app source | `argocd/apps` flat | `argocd/apps` with `recurse: true` |
+| Root app source | `argocd/apps` flat | `argocd/apps-local` with `recurse: true` |
 | Terraform namespace/secret | one each | `for_each` over environments |
 | `.env` password keys | `POSTGRES_PASSWORD` | `POSTGRES_PASSWORD_DEV` and `_PROD` |
-| Service repo CI target path | `kubernetes/<svc>/` | `kubernetes/overlays/dev/<svc>/` |
+| Service repo CI target path | `kubernetes/<svc>/` | `kubernetes/overlays/local/dev/<svc>/` |
 
 ---
 
@@ -218,17 +219,18 @@ lfi-infrastructure-gitops/
 │   │       ├── rollout.yaml
 │   │       └── service.yaml
 │   └── overlays/                           # only the differences
-│       ├── dev/
-│       │   ├── postgres/kustomization.yaml
-│       │   ├── service-1/kustomization.yaml
-│       │   └── service-2/kustomization.yaml
-│       └── prod/
-│           ├── postgres/kustomization.yaml
-│           ├── service-1/kustomization.yaml
-│           └── service-2/kustomization.yaml
+│       └── local/                          # the k3d cluster; a cloud cluster gets a sibling
+│           ├── dev/
+│           │   ├── postgres/kustomization.yaml
+│           │   ├── service-1/kustomization.yaml
+│           │   └── service-2/kustomization.yaml
+│           └── prod/
+│               ├── postgres/kustomization.yaml
+│               ├── service-1/kustomization.yaml
+│               └── service-2/kustomization.yaml
 │
 └── argocd/
-    └── apps/
+    └── apps-local/                         # one directory per cluster; a cloud cluster gets apps-<name>
         ├── dev/
         │   ├── postgres.yaml
         │   ├── service-1.yaml
@@ -364,15 +366,15 @@ git mv kubernetes/service-1 kubernetes/base/service-1
 git mv kubernetes/service-2 kubernetes/base/service-2
 git mv kubernetes/postgres  kubernetes/base/postgres
 
-mkdir -p kubernetes/overlays/dev/{service-1,service-2,postgres}
-mkdir -p kubernetes/overlays/prod/{service-1,service-2,postgres}
+mkdir -p kubernetes/overlays/local/dev/{service-1,service-2,postgres}
+mkdir -p kubernetes/overlays/local/prod/{service-1,service-2,postgres}
 ```
 
 **Validate:**
 
 ```bash
 git status --short
-ls kubernetes/base kubernetes/overlays/dev kubernetes/overlays/prod
+ls kubernetes/base kubernetes/overlays/local/dev kubernetes/overlays/local/prod
 ```
 
 Expected: `git status` shows three renames (lines starting `R`), not deletions plus additions. If you see `D` and `??` pairs, you used `mv`; `git add -A` will usually let Git detect the rename anyway.
@@ -478,7 +480,7 @@ Expected: `1` for each Rollout file, and no `kind: Deployment` anywhere. A lefto
 
 **Why:** This is where every environment difference lives, so it is the file you will return to most. Two of the choices in it are deliberate and easy to get wrong, and both are commented in place: the image reference must be complete rather than split with the base, and the replica count must be a JSON patch rather than kustomize's `replicas:` field.
 
-`kubernetes/overlays/dev/service-1/kustomization.yaml`:
+`kubernetes/overlays/local/dev/service-1/kustomization.yaml`:
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -489,7 +491,7 @@ kind: Kustomization
 namespace: platform-dev
 
 resources:
-  - ../../../base/service-1
+  - ../../../../base/service-1
 
 # The FULL image reference lives here, newName and newTag together. Splitting
 # newName into the base does not work: the overlay's transformer runs against
@@ -534,16 +536,16 @@ patches:
         value: dev.localhost
 ```
 
-`kubernetes/overlays/dev/service-2/kustomization.yaml`: the same, minus the Ingress patch (service-2 has no Ingress), with `service-2` and its own tag `44365106b8ebc12b6775f18e40d7a8ed3c50ebcb`.
+`kubernetes/overlays/local/dev/service-2/kustomization.yaml`: the same, minus the Ingress patch (service-2 has no Ingress), with `service-2` and its own tag `44365106b8ebc12b6775f18e40d7a8ed3c50ebcb`.
 
-`kubernetes/overlays/dev/postgres/kustomization.yaml`:
+`kubernetes/overlays/local/dev/postgres/kustomization.yaml`:
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: platform-dev
 resources:
-  - ../../../base/postgres
+  - ../../../../base/postgres
 # No patches. Postgres is identical in both environments except for the
 # namespace it lands in and the Secret it reads, and Terraform creates that
 # Secret per namespace under the same name. That is why the StatefulSet needs
@@ -561,7 +563,7 @@ resources:
 **Why prod has no replica patch.** The base declares `replicas: 2`, which is prod's value. Prod inherits it and dev patches down. Patching both would restate a value that is already correct. Note the consequence: changing the base replica count now changes prod silently, so if you ever want them independent, add the patch back.
 
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops/kubernetes/overlays"
+cd "$PLATFORM_HOME/lfi-infrastructure-gitops/kubernetes/overlays/local"
 
 for svc in service-1 service-2 postgres; do
   sed -e 's/platform-dev/platform-prod/' \
@@ -593,7 +595,7 @@ cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
 for env in dev prod; do
   for svc in service-1 service-2 postgres; do
     echo "=== $env/$svc ==="
-    kustomize build "kubernetes/overlays/$env/$svc" \
+    kustomize build "kubernetes/overlays/local/$env/$svc" \
       | yq '[.kind, .metadata.name, .metadata.namespace, (.spec.replicas // "n/a")] | @csv'
   done
 done
@@ -613,9 +615,9 @@ If a dev Rollout shows `2`, the replica patch did not apply. That is the silent 
 Then confirm the hosts and images:
 
 ```bash
-kustomize build kubernetes/overlays/dev/service-1  | yq 'select(.kind == "Ingress") | .spec.rules[0].host'
-kustomize build kubernetes/overlays/prod/service-1 | yq 'select(.kind == "Ingress") | .spec.rules[0].host'
-kustomize build kubernetes/overlays/prod/service-1 | yq 'select(.kind == "Rollout") | .spec.template.spec.containers[0].image'
+kustomize build kubernetes/overlays/local/dev/service-1  | yq 'select(.kind == "Ingress") | .spec.rules[0].host'
+kustomize build kubernetes/overlays/local/prod/service-1 | yq 'select(.kind == "Ingress") | .spec.rules[0].host'
+kustomize build kubernetes/overlays/local/prod/service-1 | yq 'select(.kind == "Rollout") | .spec.template.spec.containers[0].image'
 ```
 
 Expected: `dev.localhost`, then `prod.localhost`, then a full `ghcr.io/YOUR_GITHUB_USER/service-1:<sha>` reference. A bare `service-1` on that last one means the `images:` block did not match, usually because the base still has one competing with it.
@@ -741,16 +743,16 @@ variable "argo_rollouts_chart_version" {
 
 #### Task 10.3.3: Teach the root Application to recurse
 
-**Goal:** A root Application that discovers Applications inside `argocd/apps/dev/` and `argocd/apps/prod/`.
+**Goal:** A root Application that discovers Applications inside `argocd/apps-local/dev/` and `argocd/apps-local/prod/`.
 
 **Why:** ArgoCD reads only the files directly in a directory unless told otherwise. Without this one setting, the root Application finds zero children and reports `Synced` and `Healthy` having deployed absolutely nothing. That is the worst failure mode in this guide: green status, empty cluster, no error message anywhere.
 
-In `terraform/02-platform/bootstrap/root-app.yaml.tftpl`, under `source:`:
+In `terraform/02-platform/bootstrap/root-app.yaml.tftpl`, under `source:`, change `path` from `argocd/apps` to `argocd/apps-local` (decision 14) and add `recurse`:
 
 ```yaml
-    path: argocd/apps
+    path: argocd/apps-local
     directory:
-      # argocd/apps now contains dev/ and prod/ subdirectories rather than
+      # argocd/apps-local contains dev/ and prod/ subdirectories rather than
       # Application manifests directly. Without recurse, ArgoCD reads only the
       # top level, finds nothing, and reports Synced/Healthy having deployed
       # nothing at all.
@@ -888,7 +890,7 @@ options:
 
 **Why:** Application names must be unique within the `argocd` namespace, so the environment has to go in the name. This is the one identifier the two environments cannot share. If two Applications end up with the same name, ArgoCD silently manages one and ignores the other, and the ignored environment simply never updates.
 
-`argocd/apps/dev/service-1.yaml`:
+`argocd/apps-local/dev/service-1.yaml`:
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -908,7 +910,7 @@ spec:
     targetRevision: HEAD
     # The overlay, not the base. Pointing an Application at a base would
     # deploy something belonging to no environment.
-    path: kubernetes/overlays/dev/service-1
+    path: kubernetes/overlays/local/dev/service-1
   destination:
     server: https://kubernetes.default.svc
     # Redundant with the overlay's `namespace:` field, which wins for any
@@ -928,9 +930,9 @@ spec:
         maxDuration: 2m
 ```
 
-`argocd/apps/dev/service-2.yaml`: same shape, `service-2-dev`.
+`argocd/apps-local/dev/service-2.yaml`: same shape, `service-2-dev`.
 
-`argocd/apps/dev/postgres.yaml`: same shape, `postgres-dev`, plus the two settings from the original that must survive:
+`argocd/apps-local/dev/postgres.yaml`: same shape, `postgres-dev`, plus the two settings from the original that must survive:
 
 ```yaml
   syncPolicy:
@@ -950,7 +952,7 @@ spec:
         - /spec/volumeClaimTemplates
 ```
 
-Then the prod set, identical but for `-prod` names, `overlays/prod/` paths, and `platform-prod` destinations. Finally:
+Then the prod set, identical but for `-prod` names, `overlays/local/prod/` paths, and `platform-prod` destinations. Finally:
 
 ```bash
 git rm argocd/apps/service-1.yaml argocd/apps/service-2.yaml argocd/apps/postgres.yaml
@@ -959,9 +961,9 @@ git rm argocd/apps/service-1.yaml argocd/apps/service-2.yaml argocd/apps/postgre
 **Validate:**
 
 ```bash
-ls argocd/apps/dev argocd/apps/prod
-yq '.metadata.name' argocd/apps/*/*.yaml | sort | uniq -d
-grep -c 'prune: false' argocd/apps/dev/postgres.yaml argocd/apps/prod/postgres.yaml
+ls argocd/apps-local/dev argocd/apps-local/prod
+yq -N '.metadata.name' argocd/apps-local/*/*.yaml | sort | uniq -d
+grep -c 'prune: false' argocd/apps-local/dev/postgres.yaml argocd/apps-local/prod/postgres.yaml
 ```
 
 Expected: three files per directory, **no output** from the `uniq -d` (no duplicate names), and `1` for each Postgres app.
@@ -1210,7 +1212,7 @@ Five edits to `lfi-service-1-app/.github/workflows/ci.yaml`.
 ```bash
           # Task 10.2.1 moved this. Writing to the old path keeps CI green
           # while dev quietly stops receiving builds.
-          MANIFEST="kubernetes/overlays/dev/${SERVICE}/kustomization.yaml"
+          MANIFEST="kubernetes/overlays/local/dev/${SERVICE}/kustomization.yaml"
 
           # yq -i against a missing file does not reliably fail, so check.
           if [[ ! -f "$MANIFEST" ]]; then
@@ -1225,7 +1227,7 @@ Five edits to `lfi-service-1-app/.github/workflows/ci.yaml`.
           git commit -m "deploy(${SERVICE}): ${BUILD_TAG}"
 ```
 
-Also replace the two `${SHA}` references in the retry loop's `echo` lines with `${BUILD_TAG}`. Note the path targets **dev only**. Nothing automated ever writes to `overlays/prod/`; that is Section 11's job.
+Also replace the two `${SHA}` references in the retry loop's `echo` lines with `${BUILD_TAG}`. Note the path targets **dev only**. Nothing automated ever writes to `overlays/local/prod/`; that is Section 11's job.
 
 **Validate:**
 
@@ -1301,8 +1303,8 @@ Wait for both pipelines, then:
 
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops" && git pull
-grep newTag kubernetes/overlays/dev/service-1/kustomization.yaml
-git log --oneline -1 -- kubernetes/overlays/prod/service-1/kustomization.yaml
+grep newTag kubernetes/overlays/local/dev/service-1/kustomization.yaml
+git log --oneline -1 -- kubernetes/overlays/local/prod/service-1/kustomization.yaml
 kubectl -n platform-dev get rollout service-1 \
   -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
@@ -1312,7 +1314,7 @@ kubectl -n platform-dev get rollout service-1 \
 Then prove traceability in the direction the build tag would otherwise have cost you:
 
 ```bash
-TAG="$(yq '.images[0].newTag' kubernetes/overlays/dev/service-1/kustomization.yaml)"
+TAG="$(yq '.images[0].newTag' kubernetes/overlays/local/dev/service-1/kustomization.yaml)"
 docker pull "ghcr.io/YOUR_GITHUB_USER/service-1:${TAG}"
 docker inspect "ghcr.io/YOUR_GITHUB_USER/service-1:${TAG}" \
   --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -1435,9 +1437,9 @@ declare -a CHANGES=()
 declare -a BLOCKED=()
 for svc in "${SERVICES[@]}"; do
   dev_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-    "kubernetes/overlays/dev/$svc/kustomization.yaml")"
+    "kubernetes/overlays/local/dev/$svc/kustomization.yaml")"
   prod_tag="$(yq '.images[] | select(.name == "'"$svc"'") | .newTag' \
-    "kubernetes/overlays/prod/$svc/kustomization.yaml")"
+    "kubernetes/overlays/local/prod/$svc/kustomization.yaml")"
 
   [[ "$dev_tag" == "$prod_tag" ]] && continue
 
@@ -1484,7 +1486,7 @@ BODY="## Release ${WEEK}"$'\n\n'"| Service | From | To |"$'\n'"|---|---|---|"$'\
 for change in "${CHANGES[@]}"; do
   IFS='|' read -r svc from to <<< "$change"
   yq -i '(.images[] | select(.name == "'"$svc"'") | .newTag) = "'"$to"'"' \
-    "kubernetes/overlays/prod/$svc/kustomization.yaml"
+    "kubernetes/overlays/local/prod/$svc/kustomization.yaml"
   BODY+="| \`$svc\` | \`${from:0:12}\` | \`${to:0:12}\` |"$'\n'
 done
 
@@ -1500,7 +1502,7 @@ if [[ ${#BLOCKED[@]} -gt 0 ]]; then
   done
 fi
 
-git add kubernetes/overlays/prod
+git add kubernetes/overlays/local/prod
 git commit -m "release(prod): ${WEEK}"
 git push -u origin "$BRANCH"
 
@@ -1570,7 +1572,7 @@ Make a trivial change in a service repo, let CI deploy it to dev, then:
 gmake release
 ```
 
-**Validate:** the PR opens, and its diff touches **exactly one line per changed service**, all under `kubernetes/overlays/prod/`.
+**Validate:** the PR opens, and its diff touches **exactly one line per changed service**, all under `kubernetes/overlays/local/prod/`.
 
 **A real flaw worth understanding rather than working around.** If you run `gmake release` again before merging, it will happily open a second branch for the same week. The no-op check compares `main` against `main`, and your first release lives on a branch, so from `main`'s point of view there is still a release to make. Merge the PR, then re-run to see the genuine `Nothing to release` path. If this bothers you in practice, add a guard that refuses to run when a `release/*` branch already exists on the remote.
 
@@ -1584,7 +1586,7 @@ Deny whatever dev is currently running for service-1:
 
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-DEV_TAG="$(yq '.images[0].newTag' kubernetes/overlays/dev/service-1/kustomization.yaml)"
+DEV_TAG="$(yq '.images[0].newTag' kubernetes/overlays/local/dev/service-1/kustomization.yaml)"
 TAG="$DEV_TAG" yq -i '.denied += [{
   "build": strenv(TAG),
   "service": "service-1",
@@ -1610,7 +1612,7 @@ Then clean up, confirming prod was never touched:
 
 ```bash
 git switch main && git pull --ff-only
-grep newTag kubernetes/overlays/prod/service-1/kustomization.yaml
+grep newTag kubernetes/overlays/local/prod/service-1/kustomization.yaml
 yq -i '.denied = []' releases/denied-builds.yaml
 git add releases/denied-builds.yaml && git commit -m "test: remove the test denial"
 gmake release
@@ -1622,7 +1624,7 @@ Expected: the prod tag unchanged throughout, and the final `gmake release` print
 
 #### Task 11.2.1: CODEOWNERS
 
-**Goal:** Changes under `kubernetes/overlays/prod/` requiring your review, and changes under `dev/` requiring nothing.
+**Goal:** Changes under `kubernetes/overlays/local/prod/` requiring your review, and changes under `dev/` requiring nothing.
 
 **Why:** This gives you branch-protection semantics on a *directory*, which is the capability people usually reach for environment branches to get. It is the concrete reason decision 1 costs you nothing: you keep the gate and skip the weekly merge conflicts.
 
@@ -1632,14 +1634,14 @@ Expected: the prod tag unchanged throughout, and the final `gmake release` print
 # Changes under this path require review from the listed owner. This is the
 # prod release gate, and it is why environment branches are unnecessary: a
 # directory can be protected just as effectively as a branch.
-/kubernetes/overlays/prod/    @YOUR_GITHUB_USER
+/kubernetes/overlays/local/prod/    @YOUR_GITHUB_USER
 
 # Terraform provisions both environments, so it gets the same treatment.
 /terraform/                   @YOUR_GITHUB_USER
 
 # Deliberately unowned: dev is meant to be continuous, and requiring review
 # here would defeat the purpose of automated promotion.
-# /kubernetes/overlays/dev/
+# /kubernetes/overlays/local/dev/
 ```
 
 **Validate:**
@@ -1667,7 +1669,7 @@ In the GitHub UI: Settings, Branches, add a rule for `main`:
 ```bash
 git switch main
 yq -i '(.images[] | select(.name == "service-1") | .newTag) = "deadbeef"' \
-  kubernetes/overlays/prod/service-1/kustomization.yaml
+  kubernetes/overlays/local/prod/service-1/kustomization.yaml
 git commit -am "test: should be rejected" && git push
 ```
 
@@ -1760,7 +1762,7 @@ Expected: `Synced`, and the image tag back to the previous SHA. Write down how l
 
 **Why:** Three lines of real change, because Task 10.2.3 already put the strategy in the right shape. Two details in it matter. `setWeight` is a proportion of *pods*, not a traffic rule, which is why no Traefik configuration appears anywhere in this guide: the existing ClusterIP splits requests across canary and stable by endpoint count. And `pause: {}` with no duration waits indefinitely, so no timer is racing your judgment.
 
-Add to both `kubernetes/overlays/prod/service-1/kustomization.yaml` and `service-2/kustomization.yaml`, under `patches:`:
+Add to both `kubernetes/overlays/local/prod/service-1/kustomization.yaml` and `service-2/kustomization.yaml`, under `patches:`:
 
 ```yaml
   # Replaces the base's single-step strategy with a real canary. Dev keeps the
@@ -1790,9 +1792,9 @@ Add to both `kubernetes/overlays/prod/service-1/kustomization.yaml` and `service
 **Validate:**
 
 ```bash
-kustomize build kubernetes/overlays/prod/service-1 \
+kustomize build kubernetes/overlays/local/prod/service-1 \
   | yq 'select(.kind == "Rollout") | .spec.strategy.canary.steps'
-kustomize build kubernetes/overlays/dev/service-1 \
+kustomize build kubernetes/overlays/local/dev/service-1 \
   | yq 'select(.kind == "Rollout") | .spec.strategy.canary.steps'
 ```
 
@@ -2033,7 +2035,7 @@ Then answer honestly: was keeping the order straight easy, or did you have to th
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Dev Rollout runs 2 replicas instead of 1, no error anywhere | Kustomize's `replicas:` field was used on a Rollout. Its built-in transformer only knows Deployment, ReplicaSet, StatefulSet, and ReplicationController, so a custom resource matches nothing and it reports nothing | Use the JSON6902 patch from Task 10.2.4. Confirm with the replicas table in Task 10.2.6. |
-| Root Application is `Synced`/`Healthy` but no child Applications exist | `directory.recurse` missing, so ArgoCD read only the top level of `argocd/apps` and correctly found nothing | Task 10.3.3. Green status with an empty cluster is this, essentially every time. |
+| Root Application is `Synced`/`Healthy` but no child Applications exist | `directory.recurse` missing, so ArgoCD read only the top level of `argocd/apps-local` and correctly found nothing | Task 10.3.3. Green status with an empty cluster is this, essentially every time. |
 | ArgoCD reports a Rollout as `Unknown` health forever | The argo-rollouts controller is not running, so nothing is reconciling the object | `kubectl -n argo-rollouts get pods`. If empty, `gmake platform-up` did not create the Helm release. |
 | `no matches for kind "Rollout"` during sync | The CRD is not registered yet | The `wait = true` on the Helm release should prevent this. If it recurs, the root Application synced before Terraform finished; re-sync it. |
 | Only one of two same-named Applications is managed | Two Application manifests share a `metadata.name`, and names must be unique per namespace | Task 10.4.1. The `uniq -d` in its Validate finds the duplicate. |
@@ -2093,9 +2095,9 @@ gmake tag-release        # name it, after promoting
 git log --oneline --grep '^release(prod)'
 
 # --- Overlay debugging ---------------------------------------------------
-kustomize build kubernetes/overlays/prod/service-1
-diff <(kustomize build kubernetes/overlays/dev/service-1) \
-     <(kustomize build kubernetes/overlays/prod/service-1)
+kustomize build kubernetes/overlays/local/prod/service-1
+diff <(kustomize build kubernetes/overlays/local/dev/service-1) \
+     <(kustomize build kubernetes/overlays/local/prod/service-1)
 ```
 
 That last `diff` is the single most useful command in this guide. It shows the complete difference between your two environments as rendered YAML, which is exactly the question you want answered when something behaves differently in prod.
