@@ -68,6 +68,8 @@ HANDOFF-*.md
 docs/*
 !docs/1-local-full-infra-guide.md
 !docs/2-multi-env-infra-guide.md
+!docs/4-pluggable-structure-guide.md
+!docs/5-observability-setup-guide.md
 !docs/resource_check.md
 !docs/resource_check.sh
 
@@ -77,3 +79,5 @@ tracker_*.md
 !tracker_2_multi_env.md
 !docs/3-eks-counterpart-guide.md
 !tracker_3_eks.md
+!tracker_4_pluggable.md
+!tracker_5_observability.md
