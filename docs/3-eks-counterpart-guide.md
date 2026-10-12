@@ -1511,7 +1511,7 @@ The variables are `CLUSTER`, `SVC`, `ENVIRONMENT`, `ACTION` and `TO`; `YES=1` sk
 | File | Role |
 |---|---|
 | `scripts/lib.sh` | shared menus, defaults, confirmations and the "same thing without the questions" line. Written for macOS's default bash 3.2, so no associative arrays. |
-| `scripts/cluster.sh` | `up`, `down`, `destroy`: picks the order (local first going up, EKS first going down, since EKS bills), checks AWS credentials before a 20 minute EKS build, states the cost |
+| `scripts/cluster.sh` | `up`, `down`, `destroy`: picks the order (local first going up, EKS first going down, since EKS bills), checks that Docker is running before touching the local cluster and that AWS credentials work before a 20 minute EKS build, states the cost |
 | `scripts/status.sh` | the Git versus cluster table, addresses, and the follow-up hints |
 | `scripts/release.sh`, `scripts/rollback.sh`, `scripts/canary.sh` | the three ship-related commands, each gaining the cluster question |
 
