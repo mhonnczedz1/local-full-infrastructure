@@ -487,7 +487,7 @@ aws configure list-profiles
 export AWS_PROFILE=<the profile you want>
 aws configure set region ap-southeast-2 --profile "$AWS_PROFILE"
 ```
-If you use SSO, run `aws sso login --profile "$AWS_PROFILE"` first. Add the `export AWS_PROFILE=...` line to `~/.zshrc` so Terraform sees it in every terminal.
+This guide assumes an IAM user with access keys. If the profile has no keys yet, run `aws configure --profile "$AWS_PROFILE"` and paste them in; there is no login step after that. Confirm with `aws sts get-caller-identity`. Add the `export AWS_PROFILE=...` line to `~/.zshrc` so Terraform sees it in every terminal.
 
 **Validate:**
 ```bash

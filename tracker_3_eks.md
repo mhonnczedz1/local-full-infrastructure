@@ -69,9 +69,9 @@ Plan: [docs/3-eks-counterpart-guide.md](docs/3-eks-counterpart-guide.md)
 - [x] 17.4.2 Canary on EKS
 
 ## Section 18: Operating both
-- [ ] 18.1.1 Replace the per-cluster commands with commands that ask
-- [ ] 18.2.1 Drill: local only
-- [ ] 18.2.2 Drill: EKS only
-- [ ] 18.2.3 Drill: both
-- [ ] 18.3.1 Full EKS teardown leaves nothing billing
-- [ ] 18.3.2 Update the published docs
+- [x] 18.1.1 Replace the per-cluster commands with commands that ask
+- [x] 18.2.1 Drill: local only
+- [x] 18.2.2 Drill: EKS only
+- [x] 18.2.3 Drill: both
+- [x] 18.3.1 Full EKS teardown leaves nothing billing
+- [x] 18.3.2 Update the published docs
