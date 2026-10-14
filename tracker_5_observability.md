@@ -14,6 +14,19 @@ Companion to [tracker_1_local_infra.md](tracker_1_local_infra.md), [tracker_2_mu
 
 **Prerequisite:** Sections 1 to 21 complete, so both clusters run from the pluggable layout, the services, data and add-ons ApplicationSets work, and `kubectl top` answers on both clusters.
 
+## Rework for guide 4's four-repo layout (authoring)
+
+The guide was patched to match guide 4's layout: manifests live in each service's config repo, the prod analysis wiring is a `canary-analysis` component in the templates repo, and a release is one PR per service.
+
+- [x] Front matter, repo table, names (`$CFG1`, `$CFG2`, `$TPL`) and the `merge_config` helper
+- [x] Task 22.3.1 and 22.3.3: Postgres exporter in service-1's config repo
+- [x] Task 23.1.3 and 23.1.4: stable and canary Services in the config repos; the selector rule moves into `scripts/gen-appsets.sh`
+- [x] Task 23.2.3 and 23.3: one release PR per service
+- [x] Task 24.2.3 and 24.2.4: tracing variables in the config repos (prod also starts a canary)
+- [x] Task 25.1.1 to 25.1.3: `canary-analysis` component (new tag `v1.1.0`), template per config repo, fault patch as a PR in service-2's config repo
+- [x] Task 25.3.2, Appendix K (fallback for the namespace argument) and the glossary
+- [ ] Open until you run it: whether your Argo Rollouts resolves `valueFrom.fieldRef` on `metadata.namespace` (Task 25.1.2's first AnalysisRun shows it)
+
 **EKS bills while it exists** (about 0.23 USD an hour). Phases 22.4, 23.3 and 24.4 are the only ones that need it in Sections 22 to 24. Each ends with a choice to destroy it.
 
 ---

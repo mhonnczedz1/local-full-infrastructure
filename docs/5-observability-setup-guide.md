@@ -7,10 +7,11 @@
 | Checked locally | Not checked (verify as you go) |
 |---|---|
 | The Python in Sections 23 and 24 (metrics middleware, OpenTelemetry setup, fault injection) passes `ruff` and `pytest` against the pinned versions, and one trace id really does cross two in-process services | Helm chart versions and value keys for Prometheus, Grafana, Loki, Tempo and Alloy (Task 22.1.1 checks the keys you depend on) |
-| The Kustomize changes build for all twelve overlays, and the analysis block is injected into prod only | The Alloy configuration syntax, and whether Grafana's provisioning accepts the datasource blocks exactly as written |
+| The Kustomize changes build from the service config repos (eight service builds and four Postgres builds, with components fetched by remote reference), and the analysis block is injected into prod only | The Alloy configuration syntax, and whether Grafana's provisioning accepts the datasource blocks exactly as written |
 | The source patches (metrics, then tracing, then fault injection) apply in that order to the current service repos, and the resulting code passes its tests | Label names the Prometheus chart's scrape jobs attach (`service`, `namespace`, `pod`), which every query here relies on |
 | The dashboard JSON parses, `observe.sh` passes a `bash -n` syntax check under macOS bash 3.2, and the Makefile edit lists correctly in `gmake help` | How Argo Rollouts and ArgoCD behave together on the stable and canary Services (Task 23.1.3) |
-| | Every memory figure, which is an estimate to be replaced by measurement (Task 25.2.1) |
+| The edit to `scripts/gen-appsets.sh` for Service selector drift applies once, refuses a second run, regenerates both clusters' services ApplicationSet, keeps `check-contract.sh` green, and passes a server-side dry run | That Argo Rollouts resolves `valueFrom.fieldRef` on `metadata.namespace` in the analysis arguments (Task 25.1.1; Appendix K has a tested fallback) |
+| The Section 22 to 25 edits to manifests, the new `canary-analysis` component and the fault patch were applied, in order, to a scratch rehearsal of guide 4's end state (config repos, templates repo and GitOps repo, with local Git remotes standing in for GitHub) | Every memory figure, which is an estimate to be replaced by measurement (Task 25.2.1) |
 
 **Relationship to the earlier guides:** This continues `docs/1-local-full-infra-guide.md` (Sections 1 to 9), `docs/2-multi-env-infra-guide.md` (Sections 10 to 13), `docs/3-eks-counterpart-guide.md` (Sections 14 to 18) and `docs/4-pluggable-structure-guide.md` (Sections 19 to 21). Numbering resumes at Section 22 and appendix lettering at K. Every task assumes you finished Section 21: both clusters can run from the pluggable layout, the ApplicationSets for services, data and add-ons work, and EKS allows about 110 pods per node.
 
@@ -30,7 +31,7 @@ Sections are separate parts of the system. Phases are milestones inside a sectio
 
 **Local first, EKS last.** Sections 22, 23 and 24 each build and validate on the local cluster, then finish with one phase that repeats the result on EKS. Section 25 does both.
 
-**This guide touches three repositories.** The GitOps repo for add-ons, manifests and scripts, and both service repos for application code. The service changes reach a cluster the way every other change does: merge to `main`, CI builds an image, dev picks it up, and a release moves it to prod.
+**This guide touches the repositories guide 4 created.** The GitOps repo for add-ons, dashboards, scripts and the ApplicationSet generator. Each service's config repo for its manifests (the stable and canary Services, the Postgres exporter, the tracing variables, the analysis template). The templates repo for one new component, `canary-analysis`. And both service repos for application code. Application changes reach a cluster the way every other change does: merge to `main`, CI builds an image, dev picks it up, and a release moves it to prod. Manifest changes reach it when the config repo's `main` moves.
 
 **Pull requests use `gh`.** If `gh auth status` lists more than one host, the GitHub account that holds these repos may not be the default. Prefix the `gh` commands with `GH_HOST=github.com` (or your host) rather than discovering it halfway through a merge.
 
@@ -39,7 +40,9 @@ Sections are separate parts of the system. Phases are milestones inside a sectio
 | Name | Resolves to | Notes |
 |------|-------------|-------|
 | `$PLATFORM_HOME` | the project root | Set in guide 1, Task 1.2.1. Holds `docs/`, the trackers and `.tmp/`, which is gitignored here. |
-| `$PLATFORM_HOME/lfi-infrastructure-gitops` | the GitOps repo | Add-ons, manifests, dashboards, scripts and the `Makefile`, so `gmake` runs here. |
+| `$PLATFORM_HOME/lfi-infrastructure-gitops` | the GitOps repo | Add-ons, dashboards, scripts, the generator for the ApplicationSets and the `Makefile`, so `gmake` runs here. |
+| `$CFG1`, `$CFG2` | the service config repos | `lfi-service-1-config` and `lfi-service-2-config`, from guide 4. Each service's manifests. |
+| `$TPL` | the templates repo | `lfi-service-templates`, from guide 4. Components, pinned by tag. |
 | `$PLATFORM_HOME/lfi-service-1-app`, `lfi-service-2-app` | the service repos | Their own Git repos. Sections 23 and 24 change `src/`, `tests/` and `requirements.txt`. |
 
 Every command block that depends on location **starts with an explicit `cd`**. A block with no `cd` only talks to a cluster, so it runs from any directory.
@@ -48,16 +51,21 @@ Every command block that depends on location **starts with an explicit `cd`**. A
 
 Your kubeconfig almost certainly holds clusters that have nothing to do with this project. A bare `kubectl` or `helm` command acts on whichever one is current, and a stray `kubectl config use-context` in another terminal changes that silently. **Every cluster command in this guide names its context explicitly.** Never rely on, or change, the current context.
 
-Set the two names once per terminal. They come from the registry that guide 4 created, so a renamed cluster needs no edit here:
+Set these names once per terminal. The cluster contexts and the project name come from the registry that guide 4 created, so a renamed cluster or project needs no edit here. The three directories are the repos guide 4 made, beside the GitOps repo:
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
 export LOCAL_CTX="$(yq '.clusters[] | select(.name == "local") | .context' platform/registry.yaml)"
 export EKS_CTX="$(yq '.clusters[] | select(.name == "eks") | .context' platform/registry.yaml)"
+PROJECT="$(yq '.project' platform/registry.yaml)"
+export CFG1="$PLATFORM_HOME/$PROJECT-service-1-config"
+export CFG2="$PLATFORM_HOME/$PROJECT-service-2-config"
+export TPL="$PLATFORM_HOME/$PROJECT-service-templates"
 echo "$LOCAL_CTX $EKS_CTX"
+ls -d "$CFG1" "$CFG2" "$TPL"
 ```
-Expected: `k3d-platform lfi-eks`.
+Expected: `k3d-platform lfi-eks`, then the three directories listed. A missing one means guide 4's Phase 20.1 is not finished.
 
-### Three helpers used throughout
+### Four helpers used throughout
 
 Paste these into each terminal you work in. They save repeating long commands, and both pin the context you pass in.
 
@@ -85,10 +93,19 @@ merge_to_main() {
     && git merge --no-ff "$1" -m "Merge $1" && git push origin main \
     && git switch "$1" )
 }
+
+# merge_config <repo dir> <branch>: the same step for a config or templates
+# repository, which are siblings of the GitOps repo. Pass $CFG1, $CFG2 or $TPL.
+merge_config() {
+  ( cd "$1" \
+    && git switch main && git pull --ff-only \
+    && git merge --no-ff "$2" -m "Merge $2" && git push origin main \
+    && git switch "$2" )
+}
 ```
 **Stop if `git merge` reports a conflict or `git push` is rejected.** Your work is safe on the branch. A rejection by branch protection means `main` does not take direct pushes, which is a repository setting to change deliberately, not to work around.
 
-**Why `merge_to_main` exists at all.** The Applications that ArgoCD creates track `HEAD` of the default branch. Committing on a feature branch deploys nothing, which is the point of working on a branch, and merging is the deploy.
+**Why `merge_to_main` exists at all.** The Applications that ArgoCD creates track `HEAD` of the default branch. Committing on a feature branch deploys nothing, which is the point of working on a branch, and merging is the deploy. A config repo works the same way: its Applications track the default branch, so `merge_config` is the deploy for a manifest change. Use it for changes you are content to merge directly. For anything the team has protected, a prod path above all, open a pull request in that repo instead, as the release process does.
 
 ---
 
@@ -510,7 +527,7 @@ case "$WHAT" in
   traffic)
     STAGE="${PICKED_STAGES[0]}"
     DURATION="${DURATION:-120}"
-    # The Host headers mirror the ones in kubernetes/components/<cluster>-<env>.
+    # The Host headers mirror the ones in each config repo's environment kustomization.
     if [[ "$CLUSTER_NAME" == "local" ]]; then
       BASE="http://127.0.0.1:8080"
       HOST="${STAGE}.localhost"
@@ -600,9 +617,13 @@ Expected: `ok`, then `Prometheus prometheus`. In the browser, Explore with the P
 
 **The cost is a restart.** Adding a container changes the StatefulSet's pod template, so each Postgres pod restarts once. The data is on a PVC and survives, and the Postgres Application has `prune: false`. Expect a short window where the services' `/readyz` fails and comes back on its own.
 
+**Where the change lives.** Postgres belongs to service-1's team (guide 4, Task 20.1.2), so the sidecar is added to **service-1's config repo**, in `base/postgres`, where all four Postgres environments share it. It reaches the cluster when that repo's `main` moves, which Task 22.3.3 does together with the Traefik change.
+
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-cat > kubernetes/base/postgres/exporter-patch.yaml <<'EXPORTER_EOF'
+cd "$CFG1"
+git switch main && git pull --ff-only
+git switch -c feat/observability
+cat > base/postgres/exporter-patch.yaml <<'EXPORTER_EOF'
 # Adds a metrics sidecar to the Postgres pod. A sidecar is a container, not a
 # pod, so it costs memory but no entry against the node's pod limit.
 apiVersion: apps/v1
@@ -653,7 +674,7 @@ spec:
             limits:
               memory: 96Mi
 EXPORTER_EOF
-yq -i '.patches += [{"path": "exporter-patch.yaml"}]' kubernetes/base/postgres/kustomization.yaml
+yq -i '.patches += [{"path": "exporter-patch.yaml"}]' base/postgres/kustomization.yaml
 ```
 
 The image tag above is the version this guide was written against. Check it exists before relying on it:
@@ -664,21 +685,24 @@ If it reports `no such manifest`, pick a current tag from the project's releases
 
 **Validate:**
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
 for c in local eks; do for e in dev prod; do
   printf '%s %s: ' "$c" "$e"
-  kustomize build "kubernetes/overlays/$c/$e/postgres" \
+  kustomize build "$CFG1/$c/$e/postgres" \
     | yq 'select(.kind == "StatefulSet") | [.spec.template.spec.containers[].name] | join(",")'
 done; done
-kustomize build kubernetes/overlays/local/dev/postgres \
-  | yq 'select(.kind == "StatefulSet") | .spec.template.metadata.annotations' 
+kustomize build "$CFG1/local/dev/postgres" \
+  | yq 'select(.kind == "StatefulSet") | .spec.template.metadata.annotations'
 ```
 Expected: `exporter,postgres` for all four, then the three `prometheus.io/*` annotations. The volume claim must be untouched, because changing it would be refused by Kubernetes:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-kustomize build kubernetes/overlays/local/dev/postgres | yq 'select(.kind == "StatefulSet") | .spec.volumeClaimTemplates[0].spec.resources.requests.storage'
+kustomize build "$CFG1/local/dev/postgres" | yq 'select(.kind == "StatefulSet") | .spec.volumeClaimTemplates[0].spec.resources.requests.storage'
 ```
-Expected: the same size as before (`2Gi` unless you changed it).
+Expected: the same size as before (`2Gi` unless you changed it). Commit it on the branch; it is merged in Task 22.3.3:
+```bash
+cd "$CFG1"
+git add base/postgres
+git commit -m "feat(observability): Postgres exporter sidecar"
+```
 
 #### Task 22.3.2: Traefik metrics
 
@@ -770,12 +794,13 @@ kubectl --context "$LOCAL_CTX" -n kube-system get pod -l app.kubernetes.io/name=
 
 Turn one back on by setting its `enabled: true` in the values file. kube-state-metrics is the one most likely to be wanted, the first time you ask "how many restarts has this had" of a graph rather than of `kubectl`.
 
-Merge the exporter and Traefik changes:
+Merge the Traefik change in the GitOps repo and the exporter in service-1's config repo:
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-git add kubernetes/base/postgres terraform/local/02-platform/bootstrap/traefik-metrics.yaml terraform/eks/02-platform/values/traefik.yaml Makefile
-git commit -m "feat(observability): Postgres exporter sidecar and Traefik metrics"
+git add terraform/local/02-platform/bootstrap/traefik-metrics.yaml terraform/eks/02-platform/values/traefik.yaml Makefile
+git commit -m "feat(observability): Traefik metrics"
 merge_to_main feat/observability
+merge_config "$CFG1" feat/observability
 kubectl --context "$LOCAL_CTX" -n argocd annotate application root argocd.argoproj.io/refresh=hard --overwrite
 sleep 120
 ```
@@ -863,7 +888,7 @@ Commit Section 22 when its tracker rows are ticked.
 
 **Objective:** Both services report rate, errors and duration per route, service-1 also reports how long its calls to service-2 and to Postgres take, and a dashboard shows canary beside stable. Then a real canary is watched on it.
 
-This section changes application code, so it works in the two service repos as well as the GitOps repo. Work service-2 first: it is the simpler service, and it is also the one you release first, because service-1 calls it.
+This section changes application code, so it works in the two service repos as well as the GitOps repo and the two config repos. Work service-2 first: it is the simpler service, and it is also the one you release first, because service-1 calls it.
 
 ### Phase 23.1: Metrics in the services
 
@@ -1211,12 +1236,16 @@ git commit -m "feat: expose RED, outbound and database metrics on /metrics"
 
 Read the primer "why canary and stable are Services" first if you skipped it. The short version: Rollouts keeps each of these Services pointed at the right pods, so a query can name a Service instead of a hash.
 
+The Services and the two Rollout fields are the service's own manifests, so they go in each service's **config repo**, in `base/app`, which dev and prod share. The ArgoCD side is a platform policy that applies to every service, so it goes in the **GitOps repo**, in the generator that writes the services ApplicationSet.
+
+First the manifests, one branch in each config repo:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-git switch main && git pull --ff-only
-git switch -c feat/instrument
-for s in service-1 service-2; do
-  b="kubernetes/base/$s"
+for pair in "service-1:$CFG1" "service-2:$CFG2"; do
+  s="${pair%%:*}"; cfg="${pair#*:}"
+  cd "$cfg"
+  git switch main && git pull --ff-only
+  git switch -c feat/instrument
+  b=base/app
   for role in stable canary; do
     SVC=$s ROLE=$role yq '
       .metadata.name = strenv(SVC) + "-" + strenv(ROLE)
@@ -1234,40 +1263,76 @@ done
 ```
 The original `service-1` and `service-2` Services are untouched and **not** annotated. They are what Ingress and other services use, and scraping them as well would count every pod twice.
 
-Now the ArgoCD side. Rollouts rewrites the selectors of the two new Services at runtime, adding the pod-template hash. Git says `app: service-1` and the live object says `app: service-1, rollouts-pod-template-hash: ...`. ArgoCD reads that difference as drift, and with `selfHeal: true` it may revert it, which Rollouts then re-applies. The result is a fight that shows as `OutOfSync` and can disturb a canary. Tell ArgoCD to leave `.spec.selector` on Services alone, in the services ApplicationSet of both clusters:
+Now the ArgoCD side. Rollouts rewrites the selectors of the two new Services at runtime, adding the pod-template hash. Git says `app: service-1` and the live object says `app: service-1, rollouts-pod-template-hash: ...`. ArgoCD reads that difference as drift, and with `selfHeal: true` it may revert it, which Rollouts then re-applies. The result is a fight that shows as `OutOfSync` and can disturb a canary. Tell ArgoCD to leave `.spec.selector` on Services alone.
+
+The services ApplicationSets are **generated** by `scripts/gen-appsets.sh` (guide 4, Task 20.2.2), and the contract check fails if a committed file differs from what the generator writes. So the edit goes in the generator, and the files are regenerated. The edit refuses to run if the generator is not shaped as expected, and refuses a second run:
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-for c in local eks; do
-  yq -i '
-    .spec.template.spec.ignoreDifferences += [{"group": "", "kind": "Service", "jsonPointers": ["/spec/selector"]}]
-    | .spec.template.spec.syncPolicy.syncOptions += ["RespectIgnoreDifferences=true"]
-  ' "argocd/apps-$c/appsets/services.yaml"
-done
+git switch main && git pull --ff-only
+git switch -c feat/instrument
+python3 - <<'PYEOF'
+import sys
+path = "scripts/gen-appsets.sh"
+s = open(path).read()
+old = """            maxDuration: 2m
+EOF
+
+  cat > "$(out data "$c")" <<EOF"""
+new = """            maxDuration: 2m
+        syncOptions:
+          # Without this, ignoreDifferences below only hides a difference in the UI
+          # and a sync still overwrites the field.
+          - RespectIgnoreDifferences=true
+      ignoreDifferences:
+        # Argo Rollouts rewrites the selector of the stable and canary Services at
+        # runtime, adding the pod-template hash. Git says one thing and the live
+        # object another; without this, selfHeal would fight the Rollout over it.
+        - group: ""
+          kind: Service
+          jsonPointers:
+            - /spec/selector
+EOF
+
+  cat > "$(out data "$c")" <<EOF"""
+if s.count(old) != 1:
+    sys.exit(f"ERROR: {path}: expected one match for the end of the services template, found {s.count(old)}.")
+open(path, "w").write(s.replace(old, new))
+print("Edited scripts/gen-appsets.sh.")
+PYEOF
+scripts/gen-appsets.sh
 yq '.spec.template.spec | pick(["ignoreDifferences", "syncPolicy"])' argocd/apps-local/appsets/services.yaml
+scripts/check-contract.sh
 ```
 `RespectIgnoreDifferences=true` matters: without it the ignore only hides the diff in the UI and a sync still overwrites the field.
 
 **The trade-off, honestly.** This ignores selector drift on **every** Service in those apps, including the plain `service-1` and `service-2`, because `ignoreDifferences` cannot select by name pattern here. A hand-edited selector on those two would go uncorrected. On a lab cluster that is a fair price; a production one would list the four Service names explicitly.
 
-**If your ApplicationSets from guide 4 are laid out differently,** the fields belong under whatever key holds the Application `spec` in the template. The validation below prints where they landed.
+**If the edit reports no match,** your generator differs from guide 4's. Make the same change by hand: the two fields belong under the services template's `spec` (`ignoreDifferences` beside `syncPolicy`, `syncOptions` inside it). The validation below prints where they landed, and `scripts/check-contract.sh` must still print `OK`.
 
 **Validate:**
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-for c in local eks; do for e in dev prod; do for s in service-1 service-2; do
-  printf '%s %s %s: ' "$c" "$e" "$s"
-  kustomize build "kubernetes/overlays/$c/$e/$s" | yq 'select(.kind == "Service") | .metadata.name' | tr '\n' ' '
-  echo
-done; done; done
-kustomize build kubernetes/overlays/local/prod/service-1 | yq 'select(.kind == "Rollout") | .spec.strategy.canary | pick(["canaryService", "stableService"])'
-yq '.images[].newTag' kubernetes/overlays/local/dev/service-1/kustomization.yaml
+for pair in "service-1:$CFG1" "service-2:$CFG2"; do
+  s="${pair%%:*}"; cfg="${pair#*:}"
+  for c in local eks; do for e in dev prod; do
+    printf '%s %s %s: ' "$c" "$e" "$s"
+    kustomize build "$cfg/$c/$e/app" | yq -N 'select(.kind == "Service") | .metadata.name' | tr '\n' ' '
+    echo
+  done; done
+done
+kustomize build "$CFG1/local/prod/app" | yq 'select(.kind == "Rollout") | .spec.strategy.canary | pick(["canaryService", "stableService"])'
+yq '.images[].newTag' "$CFG1/local/dev/app/kustomization.yaml"
 ```
-Expected: twelve lines each listing three Services (`service-1 service-1-canary service-1-stable`, and the service-2 equivalent), the two names on the Rollout, and a build tag, which proves the field CI writes is still where CI looks. Then the ApplicationSet fields printed above.
+Expected: eight lines, each listing three Services (`service-1 service-1-canary service-1-stable`, and the service-2 equivalent), the two names on the Rollout, and a build tag, which proves the field CI writes is still where CI looks. Then the ApplicationSet fields printed above, and `OK` from the contract check.
 
 ```bash
+for cfg in "$CFG1" "$CFG2"; do
+  git -C "$cfg" add base/app
+  git -C "$cfg" commit -m "feat(observability): stable and canary Services, scraped"
+done
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-git add kubernetes/base argocd
-git commit -m "feat(observability): stable and canary Services, scraped, with selector drift ignored"
+git add scripts argocd
+git commit -m "feat(observability): ignore Service selector drift in the services ApplicationSets"
 ```
 
 #### Task 23.1.4: Ship it to dev
@@ -1286,11 +1351,14 @@ cd "$PLATFORM_HOME/lfi-service-1-app"
 git push -u origin feat/metrics
 gh pr create --fill --base main && gh pr merge --merge --delete-branch
 ```
-Then merge the manifests:
+Then merge the manifests. The ApplicationSet change goes first, so the selector rule is already in place when the new Services appear, and then the two config repos:
 ```bash
 merge_to_main feat/instrument
+merge_config "$CFG2" feat/instrument
+merge_config "$CFG1" feat/instrument
 kubectl --context "$LOCAL_CTX" -n argocd annotate application root argocd.argoproj.io/refresh=hard --overwrite
 ```
+The config repos' `base/app` is shared, so prod gets the two new Services too. Nothing in a pod template changed, so prod does not start a rollout.
 `gh pr merge` may need `--admin` or a review step if you turned on branch protection in guide 1. Follow whichever path you set up there; the point is that `main` moves and CI runs.
 
 **Validate:**
@@ -1424,7 +1492,7 @@ Write down what normal looks like: the request rate you sent and the p95 you got
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
 gmake release CLUSTER=local SVC=both
 ```
-Review and merge the PR it opens, then promote service-2 first and service-1 second, as every release in guide 2:
+It opens one PR per service, each in that service's config repo. Review and merge both, then promote service-2 first and service-1 second, as every release in guide 2:
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
 gmake status CLUSTER=local ENVIRONMENT=prod
@@ -1484,7 +1552,7 @@ Commit Section 23's tracker rows when they are ticked.
 
 ### Phase 23.3: Confirm on EKS
 
-The service builds reached EKS dev automatically (CI writes every overlay, Task 17.4.1), so only the dashboard and the cluster need attention.
+The service builds reached EKS dev automatically (each service's CI writes the dev tag for both clusters into its config repo, guide 4 Task 20.3.7), so only the dashboard and the cluster need attention.
 
 #### Task 23.3.1: Dashboard and a canary on EKS
 
@@ -2163,10 +2231,13 @@ Expected: `All checks passed!`, all tests passing, and `6 spans, 1 distinct trac
 
 **Why in the manifest and not the code.** Which collector to talk to is a property of the cluster, not of the service. The code reads standard variables, and the manifest says what they are here.
 
+The variables go in each service's config repo, in `base/app/rollout.yaml`, on a branch of their own:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-git switch -c feat/tracing-env
-for s in service-1 service-2; do
+for pair in "service-1:$CFG1" "service-2:$CFG2"; do
+  s="${pair%%:*}"; cfg="${pair#*:}"
+  cd "$cfg"
+  git switch main && git pull --ff-only
+  git switch -c feat/tracing-env
   SVC="$s" yq -i '
     .spec.template.spec.containers[0].env += [
       {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
@@ -2177,24 +2248,24 @@ for s in service-1 service-2; do
       {"name": "OTEL_EXPORTER_OTLP_PROTOCOL", "value": "http/protobuf"},
       {"name": "OTEL_TRACES_SAMPLER", "value": "parentbased_traceidratio"},
       {"name": "OTEL_TRACES_SAMPLER_ARG", "value": "1.0"}
-    ]' "kubernetes/base/$s/rollout.yaml"
+    ]' base/app/rollout.yaml
 done
 ```
 `parentbased_traceidratio` with `1.0` records every trace and, more importantly, follows the parent's sampling decision: a trace service-1 chose to record is recorded by service-2 as well, so a trace is never half-kept. Lowering the volume is done in Alloy, in one place (Task 24.4.2), not here.
 
 `$(POD_NAME)` expands inside `OTEL_RESOURCE_ATTRIBUTES` because Kubernetes substitutes variables defined **earlier in the same env list**, which is why the two downward-API variables are added first. The Tempo-to-Loki link in Task 24.1.4 relies on the resulting `k8s.pod.name` attribute.
 
-**A cluster without the stack.** These variables live in the service base, so they apply everywhere. On a cluster where Alloy is not installed the services log a failed-export warning every few seconds and otherwise carry on; tracing is best-effort by design and never fails a request. Remove the lines from that cluster's overlay if the noise bothers you.
+**A cluster without the stack.** These variables live in the service base, so they apply everywhere. On a cluster where Alloy is not installed the services log a failed-export warning every few seconds and otherwise carry on; tracing is best-effort by design and never fails a request. A team that does not want the warnings there can patch the variables out of that cluster's environments.
 
 **Validate:**
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-for s in service-1 service-2; do
-  kustomize build kubernetes/overlays/local/dev/$s \
+for pair in "service-1:$CFG1" "service-2:$CFG2"; do
+  s="${pair%%:*}"; cfg="${pair#*:}"
+  kustomize build "$cfg/local/dev/app" \
     | yq 'select(.kind == "Rollout") | .spec.template.spec.containers[0].env[] | select(.name == "OTEL_SERVICE_NAME" or .name == "OTEL_RESOURCE_ATTRIBUTES") | .name + "=" + .value'
+  git -C "$cfg" add base/app
+  git -C "$cfg" commit -m "feat(observability): point the service at Alloy"
 done
-git add kubernetes/base
-git commit -m "feat(observability): point the services at Alloy"
 ```
 Expected: for each service, `OTEL_SERVICE_NAME=<service>` and the resource attributes line with the two `$(...)` references intact (Kubernetes expands them, not Kustomize).
 
@@ -2214,11 +2285,13 @@ cd "$PLATFORM_HOME/lfi-service-1-app"
 git push -u origin feat/tracing
 gh pr create --fill --base main && gh pr merge --merge --delete-branch
 ```
-Then:
+Then merge the two config repos:
 ```bash
-merge_to_main feat/tracing-env
+merge_config "$CFG2" feat/tracing-env
+merge_config "$CFG1" feat/tracing-env
 kubectl --context "$LOCAL_CTX" -n argocd annotate application root argocd.argoproj.io/refresh=hard --overwrite
 ```
+These variables change the pod template in the shared base, so **prod starts a canary on both services as well**, on the image prod already runs. They pause at 50 percent like any release. Check with `gmake status CLUSTER=local ENVIRONMENT=prod` and promote service-2 first, then service-1, as in Task 23.2.3.
 
 **Validate:**
 ```bash
@@ -2387,25 +2460,75 @@ Section 12 ended with a human pausing the rollout at 50 percent and judging by e
 
 **Design, briefly.**
 - **Background analysis starting at step 1.** The canary steps are `setWeight: 50`, `pause: {}`, `setWeight: 100`. Step 0 is the weight change, step 1 is the pause. Starting the analysis at step 1 means it runs during the pause, which is exactly when a human is also looking. If it fails it aborts the rollout; if it succeeds the rollout still waits for you.
-- **One template per service, named after the service.** It compares that service's `-canary` and `-stable` Services. The query names them directly, so the template needs only one argument, the namespace.
-- **The prod component wires it in generically.** The analysis block is added by the `<cluster>-prod` component, which knows nothing about individual services. A Kustomize `replacement` copies each Rollout's own name into `templateName`, so the same component works for service-1, service-2, and any service added later with `gmake add-service`, as long as it has an AnalysisTemplate of the same name in its base.
-- **Dev is unaffected.** Only the prod components gain the block.
+- **One template per service, named after the service.** It compares that service's `-canary` and `-stable` Services. The query names them directly, so the template needs only one argument, the namespace. The template is the service's own manifest, so it lives in the service's config repo.
+- **A component wires it in generically.** The analysis block is added by a new `canary-analysis` component in the templates repo, which knows nothing about individual services. A Kustomize `replacement` copies each Rollout's own name into `templateName`, and the namespace argument is read from the Rollout itself (`valueFrom.fieldRef` on `metadata.namespace`), so the same component works for service-1, service-2 and any service added later, as long as its base has an AnalysisTemplate named like its Rollout.
+- **Dev is unaffected.** Only environments that name the component get the block, and only the prod environments will.
 
-Create the template for both services from one source:
+**Step 1: the component, released as a tag.** This is the platform's piece, in the templates repo:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
+cd "$TPL"
 git switch main && git pull --ff-only
-git switch -c feat/analysis
+git switch -c feat/canary-analysis
+mkdir -p components/canary-analysis
+cat > components/canary-analysis/kustomization.yaml <<'COMPONENT_EOF'
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  # Adds a background analysis from the pause step onwards. The template name
+  # and the namespace are filled in below and by Argo Rollouts, so this works for
+  # any Rollout in any namespace.
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+    patch: |-
+      - op: add
+        path: /spec/strategy/canary/analysis
+        value:
+          startingStep: 1
+          templates:
+            - templateName: placeholder
+          args:
+            # Argo Rollouts reads the Rollout's own namespace, so one component
+            # serves every environment. Kustomize cannot do this here: a
+            # component's replacements run before the environment sets its
+            # namespace, so the field would not exist yet.
+            - name: namespace
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+replacements:
+  # The analysis template is named after the Rollout.
+  - source:
+      kind: Rollout
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: Rollout
+        fieldPaths:
+          - spec.strategy.canary.analysis.templates.0.templateName
+COMPONENT_EOF
+git add components/canary-analysis
+git commit -m "add the canary-analysis component"
+merge_config "$TPL" feat/canary-analysis
+git switch main
+git tag -a v1.1.0 -m "Adds the canary-analysis component"
+git push origin v1.1.0
+```
+Releasing a tag changes nothing for anyone: no environment references `v1.1.0` yet. A component change reaches an environment only when its team moves the `?ref=`, which is the next step.
+
+**Step 2: the template, in each service's config repo.** Create it for both services from one source:
+```bash
 cat > "$PLATFORM_HOME/.tmp/analysis.yaml.in" <<'ANALYSIS_EOF'
 apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
 metadata:
-  # Named after the service, so the prod component can derive the template a
-  # Rollout uses from the Rollout's own name (see Task 25.1.1).
+  # Named after the service, so the canary-analysis component can derive the
+  # template a Rollout uses from the Rollout's own name (see Task 25.1.1).
   name: SERVICE_NAME
 spec:
   args:
-    # Which environment's series to compare. The prod component supplies it.
+    # Which environment's series to compare. The Rollout supplies it.
     - name: namespace
   metrics:
     # 1. Is the canary failing more than stable?
@@ -2453,9 +2576,13 @@ spec:
           query: |
             sum(rate(http_requests_total{namespace="{{args.namespace}}",service="SERVICE_NAME-canary"}[2m]))
 ANALYSIS_EOF
-for s in service-1 service-2; do
-  sed "s/SERVICE_NAME/$s/g" "$PLATFORM_HOME/.tmp/analysis.yaml.in" > "kubernetes/base/$s/analysis.yaml"
-  yq -i '.resources += ["analysis.yaml"]' "kubernetes/base/$s/kustomization.yaml"
+for pair in "service-1:$CFG1" "service-2:$CFG2"; do
+  s="${pair%%:*}"; cfg="${pair#*:}"
+  cd "$cfg"
+  git switch main && git pull --ff-only
+  git switch -c feat/analysis
+  sed "s/SERVICE_NAME/$s/g" "$PLATFORM_HOME/.tmp/analysis.yaml.in" > base/app/analysis.yaml
+  yq -i '.resources += ["analysis.yaml"]' base/app/kustomization.yaml
 done
 ```
 
@@ -2465,65 +2592,43 @@ done
 - `initialDelay: 90s` matters. The canary pods are new, so a two-minute rate over them has almost nothing in it for the first minute, and judging early would compare noise.
 - The Prometheus address is the Service the `prometheus` add-on creates. Task 22.1.1 confirmed its name (`prometheus-server`) and port (80) from the chart.
 
-Now the prod components. The two snippets are saved to files first so `yq` can merge them, rather than quoting a block of YAML inside a YAML expression:
+**Step 3: prod environments opt in.** Each service's prod environment, on each cluster, names the new component at the new tag, beside the `canary-manual-gate` it already uses. It copies that component's URL, so the owner and repository are never typed twice:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-cat > "$PLATFORM_HOME/.tmp/prod-analysis-patch.yaml" <<'PATCH_EOF'
-- target:
-    group: argoproj.io
-    version: v1alpha1
-    kind: Rollout
-  patch: |-
-    - op: add
-      path: /spec/strategy/canary/analysis
-      value:
-        startingStep: 1
-        templates:
-          - templateName: placeholder
-        args:
-          - name: namespace
-            value: platform-prod
-PATCH_EOF
-cat > "$PLATFORM_HOME/.tmp/prod-analysis-replacement.yaml" <<'REPL_EOF'
-- source:
-    kind: Rollout
-    fieldPath: metadata.name
-  targets:
-    - select:
-        kind: Rollout
-      fieldPaths:
-        - spec.strategy.canary.analysis.templates.0.templateName
-REPL_EOF
-for c in local eks; do
-  yq -i '
-    .patches += load("'"$PLATFORM_HOME"'/.tmp/prod-analysis-patch.yaml")
-    | .replacements += load("'"$PLATFORM_HOME"'/.tmp/prod-analysis-replacement.yaml")
-  ' "kubernetes/components/$c-prod/kustomization.yaml"
+for cfg in "$CFG1" "$CFG2"; do
+  cd "$cfg"
+  for c in local eks; do
+    f="$c/prod/app/kustomization.yaml"
+    url="$(yq '.components[] | select(test("canary-manual-gate"))' "$f")"
+    NEW="$(echo "$url" | sed 's#canary-manual-gate?ref=[^ ]*#canary-analysis?ref=v1.1.0#')" \
+      yq -i '.components += [strenv(NEW)]' "$f"
+  done
+  git add base/app local/prod eks/prod
+  git commit -m "feat(observability): error-rate analysis on prod canaries"
 done
 ```
-The namespace `platform-prod` is written in the patch because the component already belongs to one environment. If your namespace prefix is not `platform`, this is a place it appears; the stamp checklist in Task 25.3.2 lists it.
+Each reference carries its own tag, so `canary-manual-gate` stays on `v1.0.0` while `canary-analysis` is on `v1.1.0`. Move them together when it suits the team.
 
 **Validate:**
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-for c in local eks; do for e in dev prod; do for s in service-1 service-2; do
-  printf '%s %s %s: ' "$c" "$e" "$s"
-  kustomize build "kubernetes/overlays/$c/$e/$s" \
-    | yq 'select(.kind == "Rollout") | (.spec.strategy.canary.analysis.templates[0].templateName // "none")'
-done; done; done
-kustomize build kubernetes/overlays/local/prod/service-2 | yq 'select(.kind == "Rollout") | .spec.strategy.canary.analysis'
-kustomize build kubernetes/overlays/local/prod/service-2 | yq 'select(.kind == "AnalysisTemplate") | .metadata.namespace + " " + .metadata.name'
+for pair in "service-1:$CFG1" "service-2:$CFG2"; do
+  s="${pair%%:*}"; cfg="${pair#*:}"
+  for c in local eks; do for e in dev prod; do
+    printf '%s %s %s: ' "$c" "$e" "$s"
+    kustomize build "$cfg/$c/$e/app" \
+      | yq 'select(.kind == "Rollout") | (.spec.strategy.canary.analysis.templates[0].templateName // "none")'
+  done; done
+done
+kustomize build "$CFG2/local/prod/app" | yq 'select(.kind == "Rollout") | .spec.strategy.canary.analysis'
+kustomize build "$CFG2/local/prod/app" | yq 'select(.kind == "AnalysisTemplate") | .metadata.namespace + " " + .metadata.name'
 ```
-Expected: `none` for every dev overlay, and for prod the Rollout's own name (`service-1` or `service-2`) as `templateName`, derived by the replacement. The analysis block prints with `startingStep: 1` and the namespace argument, and the AnalysisTemplate lands in `platform-prod`, named `service-2`. A `templateName: placeholder` in the output means the replacement did not run; it needs Kustomize 5 or later (`kustomize version`).
+Expected: `none` for every dev build, and for prod the Rollout's own name (`service-1` or `service-2`) as `templateName`, derived by the replacement. The analysis block prints with `startingStep: 1` and the namespace argument as a `fieldRef`, and the AnalysisTemplate lands in `platform-prod`, named `service-2`. A `templateName: placeholder` in the output means the replacement did not run; it needs Kustomize 5 or later (`kustomize version`).
 
 The ordering trap: the replacement runs on the Rollout **after** the patch has added the field. If a future Kustomize applies them the other way round, the build fails with a path-not-found error on `templates.0.templateName`, not a silent wrong value.
 
-```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-git add kubernetes
-git commit -m "feat(observability): error-rate analysis on prod canaries"
-```
-Prod changes only through a release PR, so this commit is merged together with the first release that uses it, in Task 25.1.2, rather than on its own. CODEOWNERS covers `kubernetes/components/` as well as the prod overlays if guide 4 added that line; if your CODEOWNERS does not list it, add `/kubernetes/components/ @<you>` now, because a change there alters prod behaviour.
+The `fieldRef` is the one thing here that only the cluster can check: whether your Argo Rollouts version fills the namespace argument from the Rollout. Task 25.1.2's first AnalysisRun shows it, and Appendix K has a tested fallback if it does not.
+
+**Not merged yet.** The templates repo change is merged and tagged above because nothing references the tag. The config repo commits touch prod environments, and prod changes only through a release PR in the team's repo, so they are merged together with the first release that uses them, in Task 25.1.2, rather than on their own.
 
 #### Task 25.1.2: A way to make service-2 misbehave on purpose
 
@@ -2615,13 +2720,14 @@ git commit -m "feat: fault injection switches for rehearsing canary analysis"
 git push -u origin feat/fault-injection
 gh pr create --fill --base main && gh pr merge --merge --delete-branch
 ```
-When CI has promoted it to dev, merge the analysis and release to prod. The release PR carries the new service-2 build and, because it is on the same branch of the GitOps repo, review it with the analysis change in view:
+When CI has promoted it to dev, merge the analysis into both config repos and release to prod. The release PR carries the new service-2 build, and it is opened in the same repository the analysis was just merged into, so review it with the analysis change in view:
 ```bash
-merge_to_main feat/analysis
+merge_config "$CFG2" feat/analysis
+merge_config "$CFG1" feat/analysis
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
 gmake release CLUSTER=local SVC=service-2
 ```
-`merge_to_main` of a branch that touches prod paths may be refused by your branch protection or CODEOWNERS rules; if so, open it as a pull request and merge that, the way the release process in guide 2 does.
+`merge_config` of a branch that touches prod paths may be refused by that repo's branch protection or CODEOWNERS rules; if so, open it as a pull request and merge that, the way the release process in guide 2 does.
 
 Merge the release PR. This rollout **runs the new analysis for the first time**, against a healthy canary. Start traffic first:
 ```bash
@@ -2650,7 +2756,7 @@ The usual causes: the Prometheus address is wrong (a connection error names it),
 
 **Goal:** Watch the analysis abort a canary that returns errors, then watch it wave through one that returns wrong answers. Both are findings.
 
-Each rehearsal is a small change to the **prod overlay only**, which creates a new ReplicaSet, which is a canary. Save the patch once:
+Each rehearsal is a small change to service-2's **prod environment only**, in its config repo, which creates a new ReplicaSet, which is a canary. Save the patch once:
 ```bash
 cat > "$PLATFORM_HOME/.tmp/fault-patch.yaml.in" <<'EOF'
 - target:
@@ -2670,16 +2776,16 @@ The patch appends to the container's `env` list, which exists because Task 24.2.
 
 **Rehearsal A: errors. The analysis aborts it.**
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
+cd "$CFG2"
 git switch main && git pull --ff-only
 git switch -c rehearse/errors
 sed 's/FAULT_VAR/FAULT_ERROR_PERCENT/; s/FAULT_VALUE/50/' "$PLATFORM_HOME/.tmp/fault-patch.yaml.in" > "$PLATFORM_HOME/.tmp/fault-patch.yaml"
-yq -i '.patches += load("'"$PLATFORM_HOME"'/.tmp/fault-patch.yaml")' kubernetes/overlays/local/prod/service-2/kustomization.yaml
+yq -i '.patches += load("'"$PLATFORM_HOME"'/.tmp/fault-patch.yaml")' local/prod/app/kustomization.yaml
 git commit -am "rehearsal: service-2 answers 503 to half of /process"
 git push -u origin rehearse/errors
 gh pr create --fill --base main
 ```
-Merge the PR (it touches prod, so it goes through review as any release does). Start traffic the moment the canary pauses, and leave it:
+Merge the PR in the config repo (it touches prod, so it goes through review as any release does). Start traffic the moment the canary pauses, and leave it:
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
 DURATION=600 gmake traffic CLUSTER=local ENVIRONMENT=prod
@@ -2699,36 +2805,36 @@ Expected: the Rollout `Degraded` and all replicas available on the stable versio
 
 Then look for the failure with the tools from Section 24, the way you would for a real one: in Explore, Tempo, search for service `service-2` with status `error`. The failing traces are there, and each opens to the span that raised the 503.
 
-**Undo it.** The abort scaled the canary away, but Git still points at the bad configuration, exactly as after a manual abort in guide 2. Revert the rehearsal through a pull request, since it touches a prod path:
+**Undo it.** The abort scaled the canary away, but Git still points at the bad configuration, exactly as after a manual abort in guide 2. Revert the rehearsal through a pull request in the config repo, since it touches a prod path:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
+cd "$CFG2"
 git switch main && git pull --ff-only
 git log --oneline -3
 ```
 Find the merge commit of the rehearsal PR in that list and put its hash in `MERGE_SHA`, then:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
+cd "$CFG2"
 MERGE_SHA=<hash of the rehearsal's merge commit>
 git switch -c revert/rehearsal-errors
 git revert -m 1 --no-edit "$MERGE_SHA"
 git push -u origin revert/rehearsal-errors
 gh pr create --fill --base main
 ```
-(`-m 1` is for a merge commit. If you squash-merged, drop it.) Merge the PR, then confirm the overlay no longer carries the switch:
+(`-m 1` is for a merge commit. If you squash-merged, drop it.) Merge the PR, then confirm the environment no longer carries the switch:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
+cd "$CFG2"
 git switch main && git pull --ff-only
-kustomize build kubernetes/overlays/local/prod/service-2 | yq 'select(.kind == "Rollout") | .spec.template.spec.containers[0].env[].name' | grep -c FAULT || true
+kustomize build local/prod/app | yq 'select(.kind == "Rollout") | .spec.template.spec.containers[0].env[].name' | grep -c FAULT || true
 ```
 Expected: `0`. The revert itself starts a rollout to the healthy configuration, which runs the analysis again and passes; promote it when it pauses.
 
 **Rehearsal B: wrong answers. The analysis waves it through.** Repeat exactly as above with the other switch, so the only differences are the branch name, the variable and the commit message:
 ```bash
-cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
+cd "$CFG2"
 git switch main && git pull --ff-only
 git switch -c rehearse/wrong
 sed 's/FAULT_VAR/FAULT_WRONG_PERCENT/; s/FAULT_VALUE/50/' "$PLATFORM_HOME/.tmp/fault-patch.yaml.in" > "$PLATFORM_HOME/.tmp/fault-patch.yaml"
-yq -i '.patches += load("'"$PLATFORM_HOME"'/.tmp/fault-patch.yaml")' kubernetes/overlays/local/prod/service-2/kustomization.yaml
+yq -i '.patches += load("'"$PLATFORM_HOME"'/.tmp/fault-patch.yaml")' local/prod/app/kustomization.yaml
 git commit -am "rehearsal: service-2 answers wrongly to half of /process"
 git push -u origin rehearse/wrong
 gh pr create --fill --base main
@@ -2888,9 +2994,9 @@ Expected: `[]` three times. An orphaned volume shows as `available` in the conso
 **The stamp checklist.** A project created from this template (the marketplace) must change these, on top of guide 4's list. Find them all with one search:
 ```bash
 cd "$PLATFORM_HOME/lfi-infrastructure-gitops"
-grep -rn --include='*.yaml' --include='*.json' --include='*.sh' -E 'raw\.githubusercontent\.com|platform-prod|platform-dev|lfi-infrastructure-gitops' addons dashboards kubernetes/components scripts/observe.sh
+grep -rn --include='*.yaml' --include='*.json' --include='*.sh' -E 'raw\.githubusercontent\.com|platform-prod|platform-dev|lfi-infrastructure-gitops' addons dashboards scripts/observe.sh
 ```
-Each hit is one of: the dashboard URL in each cluster's Grafana values (owner and repo), the namespace in the prod component's analysis patch, and the namespace variable options in `dashboards/red.json`.
+Each hit is one of: the dashboard URL in each cluster's Grafana values (owner and repo), and the namespace variable options in `dashboards/red.json`. The analysis names no namespace any more: it reads the Rollout's own. In the other repositories, a stamped project's config repos carry its namespace prefix in the `namespace:` line of every environment kustomization, which guide 4's README section covers.
 
 **The docs.**
 1. In `lfi-infrastructure-gitops/README.md`, add `addons/<cluster>/{prometheus,grafana,loki,tempo,alloy}`, `dashboards/`, `scripts/observe.sh`, and a sentence on the three new `gmake` commands.
@@ -2933,11 +3039,24 @@ Expected: non-zero counts for the two greps, and the status showing the README, 
 | Log lines have no `trace_id` | Line was written outside a span, or by uvicorn's own logger | Only application logs inside a request carry it. Uvicorn access lines never do. |
 | Logs missing from Loki | Alloy cannot read pod logs | `logs deploy/alloy`; a `forbidden` on `pods/log` needs an RBAC rule. |
 | AnalysisRun `Error` | Prometheus address or query wrong | `kubectl get analysisrun -o jsonpath='{.items[-1:].status.metricResults[*].message}'` |
-| AnalysisRun never starts | Rollout has no step 1, or no analysis block in this overlay | Task 25.1.1's validation; dev has none by design. |
+| AnalysisRun never starts | Rollout has no step 1, or no analysis block in this environment (its kustomization does not name `canary-analysis`) | Task 25.1.1's validation; dev has none by design. |
 | Canary passes with no traffic | Metric 1 reads zero traffic as zero errors | Metric 2 exists for this; make sure traffic runs (`gmake traffic`). |
 | Replacement leaves `templateName: placeholder` | Kustomize older than 5 | `kustomize version`. |
 | `top` shows nothing on EKS | metrics-server add-on not running | Guide 4's proof add-on; `kubectl get pods -n kube-system`. |
 | Orphan EBS volumes after destroy | PVCs were not deleted before the cluster | Delete the `available` volumes tagged with the cluster name. |
+
+**Fallback for the namespace argument.** If an AnalysisRun reports an error about the `namespace` argument, your Argo Rollouts does not resolve `valueFrom.fieldRef` there. Give the component a plain placeholder and let each prod environment fill it in. In the templates repo, change the `args` entry in `components/canary-analysis/kustomization.yaml` to `value: placeholder`, commit, and release it as `v1.1.1`. Then in each prod `app/kustomization.yaml` of both config repos, move the reference to `?ref=v1.1.1` and add the replacement below, which works because the environment's own `namespace:` is already applied when it runs:
+```yaml
+replacements:
+  - source:
+      kind: Rollout
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          kind: Rollout
+        fieldPaths:
+          - spec.strategy.canary.analysis.args.0.value
+```
 
 ## Appendix L: Glossary
 
@@ -2959,7 +3078,7 @@ Expected: non-zero counts for the two greps, and the status showing the README, 
 **AnalysisTemplate.** An Argo Rollouts resource describing a metric query and the condition that counts as success or failure.
 **AnalysisRun.** One execution of an AnalysisTemplate against a live rollout.
 **Inconclusive.** An analysis result that is neither success nor failure. It leaves the rollout paused rather than aborting it.
-**Kustomize component.** A reusable bundle of patches that an overlay opts into. The prod components carry the canary and analysis settings.
+**Kustomize component.** A reusable bundle of patches that an environment opts into, here by URL and pinned to a tag of the templates repo. `canary-manual-gate` and `canary-analysis` give a prod environment its pause and its analysis.
 
 ## Where to Go Next
 
